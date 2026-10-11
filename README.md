@@ -1,3 +1,5 @@
+<p align="center"><img src="icono/setra.svg" width="112" alt="Setra"></p>
+
 # Setra
 
 Bloques de control para mecatrónica: PID, filtros, perfiles de movimiento, filtro de Kalman y modelos de plantas para simular. El nombre viene de *setpoint* y *trayectoria*.
