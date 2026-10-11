@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "Bloques de control para sistemas embebidos: PID, filtros, perfiles de movimiento y Kalman, sin std ni memoria dinámica"
 license = "MIT"
+repository = "https://github.com/safloresmo/setra"
+readme = "README.md"
 keywords = ["control", "pid", "kalman", "motion-profile", "no-std"]
 categories = ["no-std", "embedded", "science::robotics"]
 
