@@ -1,5 +1,6 @@
 //! Modelos de plantas para probar controladores sin hardware.
 
+use crate::matriz::Matriz;
 use crate::{Mate, Real};
 
 /// Un paso de Runge-Kutta de orden 4 para `dx/dt = f(x)`. La entrada de la
@@ -103,6 +104,128 @@ impl Pendulo {
     }
 }
 
+/// Péndulo invertido rotatorio, o de Furuta: un motor gira un brazo horizontal
+/// que lleva en la punta un péndulo libre. El ángulo del péndulo se mide desde
+/// la vertical hacia abajo, así que `PI` es la posición invertida.
+///
+/// El péndulo se trata como una barra delgada: solo cuenta su inercia respecto
+/// al eje en el que gira.
+#[derive(Clone, Copy, Debug)]
+pub struct Furuta {
+    /// Inercia del brazo y del rotor respecto al eje del motor, en kg·m².
+    pub inercia_brazo: Real,
+    /// Distancia del eje del motor al eje del péndulo, en metros.
+    pub longitud_brazo: Real,
+    /// Masa del péndulo, en kg.
+    pub masa_pendulo: Real,
+    /// Distancia del eje del péndulo a su centro de masa, en metros.
+    pub centro_pendulo: Real,
+    /// Inercia del péndulo respecto a su eje, en kg·m².
+    pub inercia_pendulo: Real,
+    /// Fricción viscosa en el eje del motor, en N·m·s/rad.
+    pub friccion_brazo: Real,
+    /// Fricción viscosa en el eje del péndulo, en N·m·s/rad.
+    pub friccion_pendulo: Real,
+    /// Aceleración de la gravedad, en m/s².
+    pub gravedad: Real,
+
+    pub angulo_brazo: Real,
+    pub angulo_pendulo: Real,
+    pub velocidad_brazo: Real,
+    pub velocidad_pendulo: Real,
+}
+
+impl Furuta {
+    /// Avanza `dt` segundos con el par dado en el eje del motor.
+    pub fn paso(&mut self, par: Real, dt: Real) {
+        let m = *self;
+        let x = [
+            self.angulo_brazo,
+            self.angulo_pendulo,
+            self.velocidad_brazo,
+            self.velocidad_pendulo,
+        ];
+        let x = rk4(|x| m.derivada(x, par), &x, dt);
+        [
+            self.angulo_brazo,
+            self.angulo_pendulo,
+            self.velocidad_brazo,
+            self.velocidad_pendulo,
+        ] = x;
+    }
+
+    // Acoplamiento entre el brazo y el péndulo.
+    fn acoplamiento(&self) -> Real {
+        self.masa_pendulo * self.longitud_brazo * self.centro_pendulo
+    }
+
+    fn peso(&self) -> Real {
+        self.masa_pendulo * self.gravedad * self.centro_pendulo
+    }
+
+    fn derivada(&self, x: &[Real; 4], par: Real) -> [Real; 4] {
+        let [_, angulo, v_brazo, v_pendulo] = *x;
+        let (seno, coseno) = (Mate::sin(angulo), Mate::cos(angulo));
+        let jp = self.inercia_pendulo;
+
+        // Matriz de inercia, simétrica de 2×2.
+        let m11 = self.inercia_brazo
+            + self.masa_pendulo * self.longitud_brazo * self.longitud_brazo
+            + jp * seno * seno;
+        let m12 = self.acoplamiento() * coseno;
+        let m22 = jp;
+
+        let f1 =
+            par - self.friccion_brazo * v_brazo - 2.0 * jp * seno * coseno * v_brazo * v_pendulo
+                + self.acoplamiento() * seno * v_pendulo * v_pendulo;
+        let f2 = jp * seno * coseno * v_brazo * v_brazo
+            - self.peso() * seno
+            - self.friccion_pendulo * v_pendulo;
+
+        let determinante = m11 * m22 - m12 * m12;
+        [
+            v_brazo,
+            v_pendulo,
+            (m22 * f1 - m12 * f2) / determinante,
+            (m11 * f2 - m12 * f1) / determinante,
+        ]
+    }
+
+    /// Energía mecánica, con el cero en el péndulo colgando y en reposo.
+    pub fn energia(&self) -> Real {
+        let (seno, coseno) = (
+            Mate::sin(self.angulo_pendulo),
+            Mate::cos(self.angulo_pendulo),
+        );
+        let m11 = self.inercia_brazo
+            + self.masa_pendulo * self.longitud_brazo * self.longitud_brazo
+            + self.inercia_pendulo * seno * seno;
+        m11 * self.velocidad_brazo * self.velocidad_brazo / 2.0
+            + self.acoplamiento() * coseno * self.velocidad_brazo * self.velocidad_pendulo
+            + self.inercia_pendulo * self.velocidad_pendulo * self.velocidad_pendulo / 2.0
+            + self.peso() * (1.0 - coseno)
+    }
+
+    /// Modelo lineal continuo `dx/dt = A·x + B·u` alrededor del péndulo hacia
+    /// arriba. El estado es el ángulo del brazo, la desviación del péndulo
+    /// respecto a la vertical y sus dos velocidades; la entrada es el par.
+    pub fn lineal_arriba(&self) -> (Matriz<4, 4>, Matriz<4, 1>) {
+        let j0 = self.inercia_brazo + self.masa_pendulo * self.longitud_brazo * self.longitud_brazo;
+        let jp = self.inercia_pendulo;
+        let c = self.acoplamiento();
+        let d = j0 * jp - c * c;
+        let (br, bp, peso) = (self.friccion_brazo, self.friccion_pendulo, self.peso());
+
+        let a = Matriz([
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, c * peso / d, -jp * br / d, -c * bp / d],
+            [0.0, j0 * peso / d, -c * br / d, -j0 * bp / d],
+        ]);
+        (a, Matriz([[0.0], [0.0], [jp / d], [c / d]]))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +313,92 @@ mod tests {
             p.paso(0.0, medio_periodo / pasos as Real);
         }
         assert!((p.angulo + 0.05).abs() < 1e-4, "angulo = {}", p.angulo);
+    }
+
+    fn furuta() -> Furuta {
+        Furuta {
+            inercia_brazo: 2e-3,
+            longitud_brazo: 0.12,
+            masa_pendulo: 0.02,
+            centro_pendulo: 0.1,
+            inercia_pendulo: 2.67e-4,
+            friccion_brazo: 0.0,
+            friccion_pendulo: 0.0,
+            gravedad: 9.81,
+            angulo_brazo: 0.0,
+            angulo_pendulo: 0.0,
+            velocidad_brazo: 0.0,
+            velocidad_pendulo: 0.0,
+        }
+    }
+
+    #[test]
+    fn el_furuta_sin_friccion_conserva_la_energia() {
+        let mut f = furuta();
+        f.angulo_pendulo = 2.0;
+        f.velocidad_brazo = 3.0;
+        let inicial = f.energia();
+        for _ in 0..10_000 {
+            f.paso(0.0, 5e-4);
+        }
+        assert!((f.energia() - inicial).abs() / inicial < 1e-3);
+        // El péndulo y el brazo se han intercambiado energía por el camino.
+        assert!(
+            (f.velocidad_brazo - 3.0).abs() > 0.05,
+            "w = {}",
+            f.velocidad_brazo
+        );
+    }
+
+    #[test]
+    fn el_furuta_colgando_oscila_como_un_pendulo() {
+        // Con el brazo muy pesado queda un péndulo físico corriente.
+        let mut f = furuta();
+        f.inercia_brazo = 1e3;
+        f.angulo_pendulo = 0.05;
+        let peso = f.masa_pendulo * f.gravedad * f.centro_pendulo;
+        let medio_periodo = PI * Mate::sqrt(f.inercia_pendulo / peso);
+        let pasos = 5000;
+        for _ in 0..pasos {
+            f.paso(0.0, medio_periodo / pasos as Real);
+        }
+        assert!(
+            (f.angulo_pendulo + 0.05).abs() < 1e-4,
+            "angulo = {}",
+            f.angulo_pendulo
+        );
+    }
+
+    #[test]
+    fn el_modelo_lineal_coincide_con_la_pendiente_del_no_lineal() {
+        let mut f = furuta();
+        f.friccion_brazo = 2e-3;
+        f.friccion_pendulo = 1e-4;
+        let (a, b) = f.lineal_arriba();
+        let arriba = [0.0, PI, 0.0, 0.0];
+        let paso = 1e-2;
+
+        let parecidos = |lineal: Real, numerico: Real| {
+            (lineal - numerico).abs() <= 0.02 * lineal.abs().max(1.0)
+        };
+        for columna in 0..4 {
+            let (mut mas, mut menos) = (arriba, arriba);
+            mas[columna] += paso;
+            menos[columna] -= paso;
+            let (mas, menos) = (f.derivada(&mas, 0.0), f.derivada(&menos, 0.0));
+            for fila in 0..4 {
+                let numerico = (mas[fila] - menos[fila]) / (2.0 * paso);
+                let lineal = a.0[fila][columna];
+                assert!(
+                    parecidos(lineal, numerico),
+                    "a[{fila}][{columna}]: {lineal} y {numerico}"
+                );
+            }
+        }
+        let (mas, menos) = (f.derivada(&arriba, paso), f.derivada(&arriba, -paso));
+        for fila in 0..4 {
+            let numerico = (mas[fila] - menos[fila]) / (2.0 * paso);
+            assert!(parecidos(b.0[fila][0], numerico), "b[{fila}]: {numerico}");
+        }
     }
 }

@@ -4,6 +4,7 @@ import pytest
 
 from setra import (
     Bicuadratico,
+    Furuta,
     Kalman,
     LimitadorPendiente,
     MotorDc,
@@ -241,3 +242,34 @@ def test_observador_recupera_la_velocidad():
 
     with pytest.raises(ValueError, match="`y` debe tener 1 valores"):
         observador.actualizar(0.0, [1.0, 2.0])
+
+
+def test_furuta():
+    furuta = Furuta(2e-3, 0.12, 0.02, 0.1, 2.67e-4, angulo_pendulo=2.0)
+    inicial = furuta.energia
+    for _ in range(5000):
+        furuta.paso(0.0, 1e-3)
+    assert furuta.energia == pytest.approx(inicial, rel=1e-6)
+    assert furuta.angulo_brazo != 0.0 and furuta.velocidad_pendulo != 0.0
+
+    a, b = furuta.lineal_arriba()
+    assert len(a) == 4 and len(b) == 4
+    # Hacia arriba es inestable: la gravedad aleja al péndulo de la vertical.
+    assert a[3][1] > 0.0 and b[2][0] > 0.0
+
+
+def test_furuta_se_sostiene():
+    dt = 2e-3
+    furuta = Furuta(2e-3, 0.12, 0.02, 0.1, 2.67e-4, friccion_brazo=2e-3, angulo_pendulo=math.pi + 0.15)
+    a, b = discretizar(*furuta.lineal_arriba(), dt)
+    (k,) = lqr(a, b, [[1, 0, 0, 0], [0, 10, 0, 0], [0, 0, 0.1, 0], [0, 0, 0, 0.1]], [[10.0]])
+    for _ in range(2500):
+        estado = (
+            furuta.angulo_brazo,
+            furuta.angulo_pendulo - math.pi,
+            furuta.velocidad_brazo,
+            furuta.velocidad_pendulo,
+        )
+        furuta.paso(-sum(g * x for g, x in zip(k, estado)), dt, subpasos=4)
+    assert furuta.angulo_pendulo == pytest.approx(math.pi, abs=1e-3)
+    assert furuta.angulo_brazo == pytest.approx(0.0, abs=1e-2)

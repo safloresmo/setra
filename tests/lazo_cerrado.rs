@@ -5,7 +5,7 @@ use setra::estados::{Observador, discretizar, ganancia_observador, lqr};
 use setra::matriz::{Matriz, Vector};
 use setra::perfil::{Estado, Limites, PerfilTrapezoidal};
 use setra::pid::Pid;
-use setra::planta::{MotorDc, Pendulo};
+use setra::planta::{Furuta, MotorDc, Pendulo};
 
 const PI: Real = core::f64::consts::PI as Real;
 
@@ -191,4 +191,77 @@ fn el_pendulo_invertido_se_sostiene_midiendo_solo_el_angulo() {
         (estimada - pendulo.velocidad).abs() < 5e-2,
         "estimada = {estimada}"
     );
+}
+
+#[test]
+fn el_furuta_se_sostiene_con_dos_encoders() {
+    const PERIODO: Real = 2e-3;
+    const PAR_MAX: Real = 0.3;
+
+    let mut furuta = Furuta {
+        inercia_brazo: 2e-3,
+        longitud_brazo: 0.12,
+        masa_pendulo: 0.02,
+        centro_pendulo: 0.1,
+        inercia_pendulo: 2.67e-4,
+        friccion_brazo: 2e-3,
+        friccion_pendulo: 1e-4,
+        gravedad: 9.81,
+        angulo_brazo: 0.0,
+        angulo_pendulo: PI + 0.15,
+        velocidad_brazo: 0.0,
+        velocidad_pendulo: 0.0,
+    };
+
+    let (a, b) = furuta.lineal_arriba();
+    let (a, b) = discretizar(&a, &b, PERIODO);
+    // Se miden los dos ángulos; las velocidades las da el observador.
+    let c = Matriz([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]);
+    let k = lqr(
+        &a,
+        &b,
+        &Matriz::diagonal([1.0, 10.0, 0.1, 0.1]),
+        &Matriz([[10.0]]),
+    )
+    .unwrap();
+    let l = ganancia_observador(
+        &a,
+        &c,
+        &Matriz::diagonal([1.0, 1.0, 100.0, 100.0]),
+        &Matriz::diagonal([0.01, 0.01]),
+    )
+    .unwrap();
+    let mut observador = Observador {
+        a,
+        b,
+        c,
+        l,
+        x: Vector::ceros(),
+    };
+
+    let mut brazo_max: Real = 0.0;
+    for _ in 0..2500 {
+        let par = (-(k * observador.x).0[0][0]).clamp(-PAR_MAX, PAR_MAX);
+        observador.actualizar(
+            &Vector::columna([par]),
+            &Vector::columna([furuta.angulo_brazo, furuta.angulo_pendulo - PI]),
+        );
+        for _ in 0..4 {
+            furuta.paso(par, PERIODO / 4.0);
+        }
+        brazo_max = brazo_max.max(furuta.angulo_brazo.abs());
+    }
+
+    assert!(
+        (furuta.angulo_pendulo - PI).abs() < 5e-3,
+        "pendulo = {}",
+        furuta.angulo_pendulo
+    );
+    assert!(
+        furuta.angulo_brazo.abs() < 2e-2,
+        "brazo = {}",
+        furuta.angulo_brazo
+    );
+    // Para sostenerlo el brazo no necesita dar ni media vuelta.
+    assert!(brazo_max < 1.5, "brazo_max = {brazo_max}");
 }

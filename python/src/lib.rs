@@ -390,6 +390,92 @@ impl PerfilS {
     }
 }
 
+/// Péndulo invertido rotatorio, o de Furuta: un motor gira un brazo
+/// horizontal que lleva en la punta un péndulo libre. El ángulo del péndulo
+/// se mide desde la vertical hacia abajo: `math.pi` es la posición invertida.
+#[pyclass(module = "setra")]
+struct Furuta(planta::Furuta);
+
+#[pymethods]
+impl Furuta {
+    #[new]
+    #[pyo3(signature = (inercia_brazo, longitud_brazo, masa_pendulo, centro_pendulo, inercia_pendulo, *,
+                        friccion_brazo=0.0, friccion_pendulo=0.0, gravedad=9.81,
+                        angulo_brazo=0.0, angulo_pendulo=0.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn nuevo(
+        inercia_brazo: f64,
+        longitud_brazo: f64,
+        masa_pendulo: f64,
+        centro_pendulo: f64,
+        inercia_pendulo: f64,
+        friccion_brazo: f64,
+        friccion_pendulo: f64,
+        gravedad: f64,
+        angulo_brazo: f64,
+        angulo_pendulo: f64,
+    ) -> Self {
+        Self(planta::Furuta {
+            inercia_brazo,
+            longitud_brazo,
+            masa_pendulo,
+            centro_pendulo,
+            inercia_pendulo,
+            friccion_brazo,
+            friccion_pendulo,
+            gravedad,
+            angulo_brazo,
+            angulo_pendulo,
+            velocidad_brazo: 0.0,
+            velocidad_pendulo: 0.0,
+        })
+    }
+
+    /// Avanza `dt` segundos con el par dado en el eje del motor, en
+    /// `subpasos` pasos de integración.
+    #[pyo3(signature = (par, dt, *, subpasos=1))]
+    fn paso(&mut self, par: f64, dt: f64, subpasos: u32) {
+        let subpasos = subpasos.max(1);
+        for _ in 0..subpasos {
+            self.0.paso(par, dt / f64::from(subpasos));
+        }
+    }
+
+    /// Modelo lineal continuo `(a, b)` alrededor del péndulo hacia arriba. El
+    /// estado es el ángulo del brazo, la desviación del péndulo respecto a la
+    /// vertical y sus dos velocidades; la entrada es el par.
+    fn lineal_arriba(&self) -> (Filas, Filas) {
+        let (a, b) = self.0.lineal_arriba();
+        (filas(&a), filas(&b))
+    }
+
+    /// Energía mecánica, con el cero en el péndulo colgando y en reposo.
+    #[getter]
+    fn energia(&self) -> f64 {
+        self.0.energia()
+    }
+
+    #[getter]
+    fn angulo_brazo(&self) -> f64 {
+        self.0.angulo_brazo
+    }
+
+    #[getter]
+    fn angulo_pendulo(&self) -> f64 {
+        self.0.angulo_pendulo
+    }
+
+    #[getter]
+    fn velocidad_brazo(&self) -> f64 {
+        self.0.velocidad_brazo
+    }
+
+    #[getter]
+    fn velocidad_pendulo(&self) -> f64 {
+        self.0.velocidad_pendulo
+    }
+}
+
 // Los tamaños del núcleo se fijan al compilar. Una operación que depende de
 // ellos implementa este rasgo y `segun_tamanos` la llama con los que tocan
 // según las matrices recibidas.
@@ -802,5 +888,6 @@ fn modulo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ganancia_observador, m)?)?;
     m.add_class::<MotorDc>()?;
     m.add_class::<Pendulo>()?;
+    m.add_class::<Furuta>()?;
     Ok(())
 }
