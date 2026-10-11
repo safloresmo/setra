@@ -2,7 +2,7 @@
 
 use nucleo::matriz::{Matriz, Vector};
 use nucleo::perfil::{Estado, Limites, LimitesS};
-use nucleo::{filtro, kalman, perfil, pid, planta};
+use nucleo::{estados, filtro, kalman, perfil, pid, planta};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -390,37 +390,63 @@ impl PerfilS {
     }
 }
 
-// El filtro del núcleo fija sus tamaños al compilar. Aquí se llega a él a
-// través de este rasgo, eligiendo los tamaños según las matrices recibidas.
-trait Estimador: Send + Sync {
-    fn predecir(&mut self, u: &[f64]) -> PyResult<()>;
-    fn corregir(&mut self, z: &[f64]) -> PyResult<bool>;
-    fn x(&self) -> Vec<f64>;
-    fn p(&self) -> Vec<Vec<f64>>;
+// Los tamaños del núcleo se fijan al compilar. Una operación que depende de
+// ellos implementa este rasgo y `segun_tamanos` la llama con los que tocan
+// según las matrices recibidas.
+trait PorTamanos {
+    type Salida;
+
+    fn llamar<const N: usize, const M: usize, const U: usize>(self) -> PyResult<Self::Salida>;
 }
 
-impl<const N: usize, const M: usize, const U: usize> Estimador for kalman::Kalman<N, M, U> {
-    fn predecir(&mut self, u: &[f64]) -> PyResult<()> {
-        let u = if u.is_empty() {
-            Vector::ceros()
-        } else {
-            vector("u", u)?
-        };
-        kalman::Kalman::predecir(self, &u);
-        Ok(())
+fn segun_tamanos<O: PorTamanos>(
+    estados: usize,
+    medidas: usize,
+    entradas: usize,
+    operacion: O,
+) -> PyResult<O::Salida> {
+    match estados {
+        1 => segun_medidas::<O, 1>(medidas, entradas, operacion),
+        2 => segun_medidas::<O, 2>(medidas, entradas, operacion),
+        3 => segun_medidas::<O, 3>(medidas, entradas, operacion),
+        4 => segun_medidas::<O, 4>(medidas, entradas, operacion),
+        5 => segun_medidas::<O, 5>(medidas, entradas, operacion),
+        6 => segun_medidas::<O, 6>(medidas, entradas, operacion),
+        _ => Err(PyValueError::new_err("se admiten de 1 a 6 estados")),
     }
+}
 
-    fn corregir(&mut self, z: &[f64]) -> PyResult<bool> {
-        Ok(kalman::Kalman::corregir(self, &vector("z", z)?))
+fn segun_medidas<O: PorTamanos, const N: usize>(
+    medidas: usize,
+    entradas: usize,
+    operacion: O,
+) -> PyResult<O::Salida> {
+    match medidas {
+        1 => segun_entradas::<O, N, 1>(entradas, operacion),
+        2 => segun_entradas::<O, N, 2>(entradas, operacion),
+        3 => segun_entradas::<O, N, 3>(entradas, operacion),
+        4 => segun_entradas::<O, N, 4>(entradas, operacion),
+        _ => Err(PyValueError::new_err("se admiten de 1 a 4 medidas")),
     }
+}
 
-    fn x(&self) -> Vec<f64> {
-        self.x.0.iter().map(|fila| fila[0]).collect()
+fn segun_entradas<O: PorTamanos, const N: usize, const M: usize>(
+    entradas: usize,
+    operacion: O,
+) -> PyResult<O::Salida> {
+    match entradas {
+        1 => operacion.llamar::<N, M, 1>(),
+        2 => operacion.llamar::<N, M, 2>(),
+        3 => operacion.llamar::<N, M, 3>(),
+        4 => operacion.llamar::<N, M, 4>(),
+        _ => Err(PyValueError::new_err("se admiten de 1 a 4 entradas")),
     }
+}
 
-    fn p(&self) -> Vec<Vec<f64>> {
-        self.p.0.iter().map(|fila| fila.to_vec()).collect()
-    }
+type Filas = Vec<Vec<f64>>;
+
+fn columnas(filas: &[Vec<f64>]) -> usize {
+    filas.first().map_or(0, Vec::len)
 }
 
 fn matriz<const F: usize, const C: usize>(
@@ -446,69 +472,210 @@ fn vector<const N: usize>(nombre: &str, valores: &[f64]) -> PyResult<Vector<N>> 
     Ok(Vector::columna(valores))
 }
 
-struct DatosKalman {
-    a: Vec<Vec<f64>>,
-    b: Option<Vec<Vec<f64>>>,
-    h: Vec<Vec<f64>>,
-    q: Vec<Vec<f64>>,
-    r: Vec<Vec<f64>>,
+fn filas<const F: usize, const C: usize>(m: &Matriz<F, C>) -> Filas {
+    m.0.iter().map(|fila| fila.to_vec()).collect()
+}
+
+fn valores<const N: usize>(v: &Vector<N>) -> Vec<f64> {
+    v.0.iter().map(|fila| fila[0]).collect()
+}
+
+// Una entrada vacía vale por «sin entrada».
+fn entrada<const U: usize>(u: &[f64]) -> PyResult<Vector<U>> {
+    if u.is_empty() {
+        Ok(Vector::ceros())
+    } else {
+        vector("u", u)
+    }
+}
+
+struct Discretizar {
+    a: Filas,
+    b: Filas,
+    dt: f64,
+}
+
+impl PorTamanos for Discretizar {
+    type Salida = (Filas, Filas);
+
+    fn llamar<const N: usize, const M: usize, const U: usize>(self) -> PyResult<Self::Salida> {
+        let (ad, bd) =
+            estados::discretizar::<N, U>(&matriz("a", &self.a)?, &matriz("b", &self.b)?, self.dt);
+        Ok((filas(&ad), filas(&bd)))
+    }
+}
+
+/// Pasa el modelo continuo `dx/dt = a·x + b·u` al discreto
+/// `x[k+1] = ad·x[k] + bd·u[k]` con periodo `dt`. Devuelve `(ad, bd)`.
+///
+/// `dt` debe ser pequeño frente a la dinámica del sistema.
+#[pyfunction]
+fn discretizar(a: Filas, b: Filas, dt: f64) -> PyResult<(Filas, Filas)> {
+    segun_tamanos(a.len(), 1, columnas(&b), Discretizar { a, b, dt })
+}
+
+struct Lqr {
+    a: Filas,
+    b: Filas,
+    q: Filas,
+    r: Filas,
+}
+
+impl PorTamanos for Lqr {
+    type Salida = Filas;
+
+    fn llamar<const N: usize, const M: usize, const U: usize>(self) -> PyResult<Self::Salida> {
+        estados::lqr::<N, U>(
+            &matriz("a", &self.a)?,
+            &matriz("b", &self.b)?,
+            &matriz("q", &self.q)?,
+            &matriz("r", &self.r)?,
+        )
+        .map(|k| filas(&k))
+        .ok_or_else(|| PyValueError::new_err("el regulador no converge con ese sistema"))
+    }
+}
+
+/// Ganancia `k` del regulador lineal cuadrático para el sistema discreto
+/// `x[k+1] = a·x[k] + b·u[k]`: la ley `u = -k·x` minimiza la suma de
+/// `xᵀ·q·x + uᵀ·r·u`.
+#[pyfunction]
+fn lqr(a: Filas, b: Filas, q: Filas, r: Filas) -> PyResult<Filas> {
+    segun_tamanos(a.len(), 1, columnas(&b), Lqr { a, b, q, r })
+}
+
+struct GananciaObservador {
+    a: Filas,
+    c: Filas,
+    q: Filas,
+    r: Filas,
+}
+
+impl PorTamanos for GananciaObservador {
+    type Salida = Filas;
+
+    fn llamar<const N: usize, const M: usize, const U: usize>(self) -> PyResult<Self::Salida> {
+        estados::ganancia_observador::<N, M>(
+            &matriz("a", &self.a)?,
+            &matriz("c", &self.c)?,
+            &matriz("q", &self.q)?,
+            &matriz("r", &self.r)?,
+        )
+        .map(|l| filas(&l))
+        .ok_or_else(|| PyValueError::new_err("el observador no converge con ese sistema"))
+    }
+}
+
+/// Ganancia `l` para un `Observador` del sistema `x[k+1] = a·x[k]`,
+/// `y[k] = c·x[k]`. Con más `q` frente a `r` el observador corrige más
+/// rápido y deja pasar más ruido de la medida.
+#[pyfunction]
+fn ganancia_observador(a: Filas, c: Filas, q: Filas, r: Filas) -> PyResult<Filas> {
+    segun_tamanos(a.len(), c.len(), 1, GananciaObservador { a, c, q, r })
+}
+
+trait Reconstructor: Send + Sync {
+    fn actualizar(&mut self, u: &[f64], y: &[f64]) -> PyResult<()>;
+    fn x(&self) -> Vec<f64>;
+}
+
+impl<const N: usize, const M: usize, const U: usize> Reconstructor
+    for estados::Observador<N, M, U>
+{
+    fn actualizar(&mut self, u: &[f64], y: &[f64]) -> PyResult<()> {
+        estados::Observador::actualizar(self, &entrada(u)?, &vector("y", y)?);
+        Ok(())
+    }
+
+    fn x(&self) -> Vec<f64> {
+        valores(&self.x)
+    }
+}
+
+struct CrearObservador {
+    a: Filas,
+    b: Filas,
+    c: Filas,
+    l: Filas,
     x: Option<Vec<f64>>,
-    p: Option<Vec<Vec<f64>>>,
 }
 
-fn construir<const N: usize, const M: usize, const U: usize>(
-    d: &DatosKalman,
-) -> PyResult<Box<dyn Estimador>> {
-    Ok(Box::new(kalman::Kalman::<N, M, U> {
-        a: matriz("a", &d.a)?,
-        b: match &d.b {
-            Some(b) => matriz("b", b)?,
-            None => Matriz::ceros(),
-        },
-        h: matriz("h", &d.h)?,
-        q: matriz("q", &d.q)?,
-        r: matriz("r", &d.r)?,
-        x: match &d.x {
-            Some(x) => vector("x", x)?,
-            None => Vector::ceros(),
-        },
-        p: match &d.p {
-            Some(p) => matriz("p", p)?,
-            None => Matriz::identidad(),
-        },
-    }))
-}
+impl PorTamanos for CrearObservador {
+    type Salida = Box<dyn Reconstructor>;
 
-fn con_entradas<const N: usize, const M: usize>(d: &DatosKalman) -> PyResult<Box<dyn Estimador>> {
-    // Sin `b` no hay entradas: queda una sola, con ganancia cero.
-    match d.b.as_ref().map_or(1, |b| b.first().map_or(0, Vec::len)) {
-        1 => construir::<N, M, 1>(d),
-        2 => construir::<N, M, 2>(d),
-        3 => construir::<N, M, 3>(d),
-        4 => construir::<N, M, 4>(d),
-        _ => Err(PyValueError::new_err("`b` debe tener de 1 a 4 columnas")),
+    fn llamar<const N: usize, const M: usize, const U: usize>(self) -> PyResult<Self::Salida> {
+        Ok(Box::new(estados::Observador::<N, M, U> {
+            a: matriz("a", &self.a)?,
+            b: matriz("b", &self.b)?,
+            c: matriz("c", &self.c)?,
+            l: matriz("l", &self.l)?,
+            x: match &self.x {
+                Some(x) => vector("x", x)?,
+                None => Vector::ceros(),
+            },
+        }))
     }
 }
 
-fn con_medidas<const N: usize>(d: &DatosKalman) -> PyResult<Box<dyn Estimador>> {
-    match d.h.len() {
-        1 => con_entradas::<N, 1>(d),
-        2 => con_entradas::<N, 2>(d),
-        3 => con_entradas::<N, 3>(d),
-        4 => con_entradas::<N, 4>(d),
-        _ => Err(PyValueError::new_err("`h` debe tener de 1 a 4 filas")),
+// El filtro de Kalman del núcleo, visto sin sus tamaños.
+trait Estimador: Send + Sync {
+    fn predecir(&mut self, u: &[f64]) -> PyResult<()>;
+    fn corregir(&mut self, z: &[f64]) -> PyResult<bool>;
+    fn x(&self) -> Vec<f64>;
+    fn p(&self) -> Filas;
+}
+
+impl<const N: usize, const M: usize, const U: usize> Estimador for kalman::Kalman<N, M, U> {
+    fn predecir(&mut self, u: &[f64]) -> PyResult<()> {
+        kalman::Kalman::predecir(self, &entrada(u)?);
+        Ok(())
+    }
+
+    fn corregir(&mut self, z: &[f64]) -> PyResult<bool> {
+        Ok(kalman::Kalman::corregir(self, &vector("z", z)?))
+    }
+
+    fn x(&self) -> Vec<f64> {
+        valores(&self.x)
+    }
+
+    fn p(&self) -> Filas {
+        filas(&self.p)
     }
 }
 
-fn con_estados(d: &DatosKalman) -> PyResult<Box<dyn Estimador>> {
-    match d.a.len() {
-        1 => con_medidas::<1>(d),
-        2 => con_medidas::<2>(d),
-        3 => con_medidas::<3>(d),
-        4 => con_medidas::<4>(d),
-        5 => con_medidas::<5>(d),
-        6 => con_medidas::<6>(d),
-        _ => Err(PyValueError::new_err("`a` debe tener de 1 a 6 filas")),
+struct CrearKalman {
+    a: Filas,
+    b: Option<Filas>,
+    h: Filas,
+    q: Filas,
+    r: Filas,
+    x: Option<Vec<f64>>,
+    p: Option<Filas>,
+}
+
+impl PorTamanos for CrearKalman {
+    type Salida = Box<dyn Estimador>;
+
+    fn llamar<const N: usize, const M: usize, const U: usize>(self) -> PyResult<Self::Salida> {
+        Ok(Box::new(kalman::Kalman::<N, M, U> {
+            a: matriz("a", &self.a)?,
+            b: match &self.b {
+                Some(b) => matriz("b", b)?,
+                None => Matriz::ceros(),
+            },
+            h: matriz("h", &self.h)?,
+            q: matriz("q", &self.q)?,
+            r: matriz("r", &self.r)?,
+            x: match &self.x {
+                Some(x) => vector("x", x)?,
+                None => Vector::ceros(),
+            },
+            p: match &self.p {
+                Some(p) => matriz("p", p)?,
+                None => Matriz::identidad(),
+            },
+        }))
     }
 }
 
@@ -543,15 +710,17 @@ impl Kalman {
     #[new]
     #[pyo3(signature = (a, h, q, r, *, b=None, x=None, p=None))]
     fn nuevo(
-        a: Vec<Vec<f64>>,
-        h: Vec<Vec<f64>>,
-        q: Vec<Vec<f64>>,
-        r: Vec<Vec<f64>>,
-        b: Option<Vec<Vec<f64>>>,
+        a: Filas,
+        h: Filas,
+        q: Filas,
+        r: Filas,
+        b: Option<Filas>,
         x: Option<Vec<f64>>,
-        p: Option<Vec<Vec<f64>>>,
+        p: Option<Filas>,
     ) -> PyResult<Self> {
-        con_estados(&DatosKalman {
+        // Sin `b` no hay entradas: queda una sola, con ganancia cero.
+        let entradas = b.as_deref().map_or(1, columnas);
+        let crear = CrearKalman {
             a,
             b,
             h,
@@ -559,8 +728,8 @@ impl Kalman {
             r,
             x,
             p,
-        })
-        .map(Self)
+        };
+        segun_tamanos(crear.a.len(), crear.h.len(), entradas, crear).map(Self)
     }
 
     /// Avanza la estimación un periodo. Sin `u` la entrada es cero.
@@ -583,8 +752,38 @@ impl Kalman {
 
     /// Covarianza del error de la estimación, por filas.
     #[getter]
-    fn p(&self) -> Vec<Vec<f64>> {
+    fn p(&self) -> Filas {
         self.0.p()
+    }
+}
+
+/// Observador de Luenberger: reconstruye el estado completo a partir de las
+/// entradas aplicadas y de las salidas medidas, con ganancia fija `l`.
+///
+///     x[k+1] = a·x[k] + b·u[k] + l·(y[k] - c·x[k])
+///
+/// Admite los mismos tamaños que `Kalman`. Sin `x` el estado inicial es cero.
+#[pyclass(module = "setra")]
+struct Observador(Box<dyn Reconstructor>);
+
+#[pymethods]
+impl Observador {
+    #[new]
+    #[pyo3(signature = (a, b, c, l, *, x=None))]
+    fn nuevo(a: Filas, b: Filas, c: Filas, l: Filas, x: Option<Vec<f64>>) -> PyResult<Self> {
+        let crear = CrearObservador { a, b, c, l, x };
+        segun_tamanos(crear.a.len(), crear.c.len(), columnas(&crear.b), crear).map(Self)
+    }
+
+    /// Avanza un periodo con la entrada aplicada y la medida de ese instante.
+    fn actualizar(&mut self, u: Valores, y: Valores) -> PyResult<()> {
+        self.0.actualizar(&u.lista(), &y.lista())
+    }
+
+    /// Estado estimado.
+    #[getter]
+    fn x(&self) -> Vec<f64> {
+        self.0.x()
     }
 }
 
@@ -597,6 +796,10 @@ fn modulo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PerfilTrapezoidal>()?;
     m.add_class::<PerfilS>()?;
     m.add_class::<Kalman>()?;
+    m.add_class::<Observador>()?;
+    m.add_function(wrap_pyfunction!(discretizar, m)?)?;
+    m.add_function(wrap_pyfunction!(lqr, m)?)?;
+    m.add_function(wrap_pyfunction!(ganancia_observador, m)?)?;
     m.add_class::<MotorDc>()?;
     m.add_class::<Pendulo>()?;
     Ok(())

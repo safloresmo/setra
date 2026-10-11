@@ -7,11 +7,15 @@ from setra import (
     Kalman,
     LimitadorPendiente,
     MotorDc,
+    Observador,
     PasoBajo,
     Pendulo,
     PerfilS,
     PerfilTrapezoidal,
     Pid,
+    discretizar,
+    ganancia_observador,
+    lqr,
 )
 
 DT = 1e-3
@@ -171,7 +175,7 @@ def test_kalman_acepta_numpy():
 def test_kalman_rechaza_tamanos_incorrectos():
     with pytest.raises(ValueError, match="`h` debe ser de 1×2"):
         Kalman([[1.0, 0.0], [0.0, 1.0]], [[1.0]], [[1.0, 0.0], [0.0, 1.0]], [[1.0]])
-    with pytest.raises(ValueError, match="de 1 a 6 filas"):
+    with pytest.raises(ValueError, match="de 1 a 6 estados"):
         Kalman([[1.0] * 7] * 7, [[1.0] * 7], [[1.0] * 7] * 7, [[1.0]])
     filtro = kalman_de_velocidad(0.01)
     with pytest.raises(ValueError, match="`z` debe tener 1 valores"):
@@ -184,3 +188,56 @@ def test_kalman_sin_incertidumbre_no_corrige():
     filtro = Kalman([[1.0]], [[1.0]], [[0.0]], [[0.0]], x=[2.0], p=[[0.0]])
     assert not filtro.corregir(5.0)
     assert filtro.x == [2.0]
+
+
+def doble_integrador(dt):
+    return discretizar([[0.0, 1.0], [0.0, 0.0]], [[0.0], [1.0]], dt)
+
+
+def test_discretizar():
+    a, b = doble_integrador(0.01)
+    assert a == [[1.0, 0.01], [0.0, 1.0]]
+    assert b == [pytest.approx([5e-5]), pytest.approx([0.01])]
+
+    a, b = discretizar([[-2.0]], [[3.0]], 0.1)
+    assert a[0][0] == pytest.approx(math.exp(-0.2))
+    assert b[0][0] == pytest.approx(3.0 * (1 - math.exp(-0.2)) / 2)
+
+
+def test_lqr():
+    aureo = (1 + math.sqrt(5)) / 2
+    assert lqr([[1.0]], [[1.0]], [[1.0]], [[1.0]])[0][0] == pytest.approx(aureo / (1 + aureo))
+
+    a, b = doble_integrador(0.01)
+    (k,) = lqr(a, b, [[10.0, 0.0], [0.0, 1.0]], [[0.1]])
+    posicion, velocidad = 1.0, 0.0
+    for _ in range(500):
+        u = -(k[0] * posicion + k[1] * velocidad)
+        posicion, velocidad = (
+            a[0][0] * posicion + a[0][1] * velocidad + b[0][0] * u,
+            a[1][0] * posicion + a[1][1] * velocidad + b[1][0] * u,
+        )
+    assert abs(posicion) < 1e-3 and abs(velocidad) < 1e-3
+
+    with pytest.raises(ValueError, match="no converge"):
+        lqr([[2.0]], [[0.0]], [[1.0]], [[1.0]])
+    with pytest.raises(ValueError, match="`b` debe ser de 2×1"):
+        lqr(a, [[1.0]], [[1.0, 0.0], [0.0, 1.0]], [[1.0]])
+
+
+def test_observador_recupera_la_velocidad():
+    dt = 0.01
+    a, b = doble_integrador(dt)
+    c = [[1.0, 0.0]]
+    l = ganancia_observador(a, c, [[1.0, 0.0], [0.0, 100.0]], [[0.01]])
+    observador = Observador(a, b, c, l)
+
+    posicion, velocidad, aceleracion = 2.0, -3.0, 0.5
+    for _ in range(300):
+        observador.actualizar(aceleracion, posicion)
+        posicion += velocidad * dt + aceleracion * dt * dt / 2
+        velocidad += aceleracion * dt
+    assert observador.x == pytest.approx([posicion, velocidad], abs=1e-3)
+
+    with pytest.raises(ValueError, match="`y` debe tener 1 valores"):
+        observador.actualizar(0.0, [1.0, 2.0])

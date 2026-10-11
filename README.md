@@ -2,7 +2,7 @@
 
 # Setra
 
-Bloques de control para mecatrónica: PID, filtros, perfiles de movimiento, filtro de Kalman y modelos de plantas para simular. El nombre viene de *setpoint* y *trayectoria*.
+Bloques de control para mecatrónica: PID, filtros, perfiles de movimiento, control por espacio de estados, filtro de Kalman y modelos de plantas para simular. El nombre viene de *setpoint* y *trayectoria*.
 
 El núcleo está escrito en Rust sin `std` ni memoria dinámica, así que el mismo código que se prueba en la computadora es el que corre en un microcontrolador. Encima lleva un módulo de Python para simular, sintonizar y graficar con las mismas clases.
 
@@ -16,6 +16,7 @@ El núcleo está escrito en Rust sin `std` ni memoria dinámica, así que el mis
 | `filtro` | Paso bajo de primer orden, bicuadrático (paso bajo y rechaza banda) y limitador de pendiente | `PasoBajo`, `Bicuadratico`, `LimitadorPendiente` |
 | `perfil` | Perfil trapezoidal de posición, con velocidad inicial y final para replanear en marcha, y perfil en S con el jerk limitado | `PerfilTrapezoidal`, `PerfilS` |
 | `planta` | Motor de corriente continua, péndulo e integrador de Runge-Kutta de orden 4 | `MotorDc`, `Pendulo` |
+| `estados` | Discretización de un modelo continuo, ganancia del regulador LQR, ganancia del observador y observador de Luenberger | `discretizar`, `lqr`, `ganancia_observador`, `Observador` |
 | `kalman` | Filtro de Kalman lineal de tamaño fijo | `Kalman` (hasta 6 estados, 4 medidas y 4 entradas; acepta listas o arreglos de NumPy) |
 | `matriz` | Matrices de tamaño fijo con producto, transpuesta e inversa | — |
 
@@ -46,7 +47,12 @@ for _ in range(1000):
 print(motor.velocidad)  # 150 rad/s
 ```
 
-`python/ejemplos/motor_dc.py` genera la gráfica de arriba (necesita `matplotlib`): un perfil trapezoidal mueve el motor 20 rad y a los 0.2 s entra un par de carga.
+Los ejemplos de `python/ejemplos/` necesitan `matplotlib`:
+
+- `motor_dc.py` genera la gráfica de arriba: un perfil trapezoidal mueve el motor 20 rad y a los 0.2 s entra un par de carga.
+- `pendulo_invertido.py` sostiene un péndulo invertido midiendo solo el ángulo: un regulador LQR calcula el par y un observador reconstruye la velocidad. Arranca desviado 11° y a los 1.5 s recibe un empujón.
+
+![Péndulo invertido con regulador LQR y observador](capturas/pendulo_invertido.png)
 
 ## En Rust
 

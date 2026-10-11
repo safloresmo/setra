@@ -9,6 +9,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod estados;
 pub mod filtro;
 pub mod kalman;
 pub mod matriz;

@@ -1,9 +1,13 @@
 //! Lazos completos sobre el modelo del motor.
 
 use setra::Real;
+use setra::estados::{Observador, discretizar, ganancia_observador, lqr};
+use setra::matriz::{Matriz, Vector};
 use setra::perfil::{Estado, Limites, PerfilTrapezoidal};
 use setra::pid::Pid;
-use setra::planta::MotorDc;
+use setra::planta::{MotorDc, Pendulo};
+
+const PI: Real = core::f64::consts::PI as Real;
 
 const DT: Real = 1e-3;
 const SUBPASOS: usize = 20;
@@ -118,5 +122,73 @@ fn la_velocidad_aguanta_un_par_de_carga() {
         (motor.velocidad - REFERENCIA).abs() < 0.5,
         "w = {}",
         motor.velocidad
+    );
+}
+
+#[test]
+fn el_pendulo_invertido_se_sostiene_midiendo_solo_el_angulo() {
+    const PERIODO: Real = 2e-3;
+    const PAR_MAX: Real = 0.5;
+
+    let mut pendulo = Pendulo {
+        masa: 0.2,
+        longitud: 0.5,
+        friccion: 1e-3,
+        gravedad: 9.81,
+        angulo: PI + 0.2,
+        velocidad: 0.0,
+    };
+
+    // Modelo lineal alrededor de la vertical hacia arriba; el estado es la
+    // desviación del ángulo y su velocidad.
+    let inercia = pendulo.masa * pendulo.longitud * pendulo.longitud;
+    let (a, b) = discretizar(
+        &Matriz([
+            [0.0, 1.0],
+            [
+                pendulo.gravedad / pendulo.longitud,
+                -pendulo.friccion / inercia,
+            ],
+        ]),
+        &Matriz([[0.0], [1.0 / inercia]]),
+        PERIODO,
+    );
+    let c = Matriz([[1.0, 0.0]]);
+    let k = lqr(&a, &b, &Matriz::diagonal([10.0, 0.1]), &Matriz([[1.0]])).unwrap();
+    let l =
+        ganancia_observador(&a, &c, &Matriz::diagonal([1.0, 100.0]), &Matriz([[0.01]])).unwrap();
+    let mut observador = Observador {
+        a,
+        b,
+        c,
+        l,
+        x: Vector::ceros(),
+    };
+
+    for _ in 0..1500 {
+        let par = (-(k * observador.x).0[0][0]).clamp(-PAR_MAX, PAR_MAX);
+        observador.actualizar(
+            &Vector::columna([par]),
+            &Vector::columna([pendulo.angulo - PI]),
+        );
+        for _ in 0..4 {
+            pendulo.paso(par, PERIODO / 4.0);
+        }
+    }
+
+    assert!(
+        (pendulo.angulo - PI).abs() < 5e-3,
+        "angulo = {}",
+        pendulo.angulo
+    );
+    assert!(
+        pendulo.velocidad.abs() < 5e-2,
+        "velocidad = {}",
+        pendulo.velocidad
+    );
+    let estimada = observador.x.0[1][0];
+    assert!(
+        (estimada - pendulo.velocidad).abs() < 5e-2,
+        "estimada = {estimada}"
     );
 }

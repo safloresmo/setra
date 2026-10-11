@@ -15,6 +15,14 @@ impl<const F: usize, const C: usize> Matriz<F, C> {
         Self([[0.0; C]; F])
     }
 
+    /// La matriz con cada elemento multiplicado por `k`.
+    pub fn escalada(mut self, k: Real) -> Self {
+        for valor in self.0.iter_mut().flatten() {
+            *valor *= k;
+        }
+        self
+    }
+
     pub fn transpuesta(&self) -> Matriz<C, F> {
         let mut t = Matriz::ceros();
         for f in 0..F {
