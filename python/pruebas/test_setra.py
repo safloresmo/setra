@@ -4,10 +4,12 @@ import pytest
 
 from setra import (
     Bicuadratico,
+    Kalman,
     LimitadorPendiente,
     MotorDc,
     PasoBajo,
     Pendulo,
+    PerfilS,
     PerfilTrapezoidal,
     Pid,
 )
@@ -107,3 +109,78 @@ def test_pendulo_conserva_la_energia():
         pendulo.paso(0.0, DT)
     assert pendulo.energia == pytest.approx(inicial, rel=1e-6)
     assert pendulo.velocidad != 0.0 and abs(pendulo.angulo) <= 1.0 + 1e-6
+
+
+def test_perfil_s():
+    perfil = PerfilS(2.0, 4.0, 20.0, 0.0, 5.0)
+    assert perfil.duracion == pytest.approx(3.2)
+    assert perfil.estado(0.0) == (0.0, 0.0, 0.0)
+    # A media rampa de jerk, en plena aceleración y en crucero.
+    assert perfil.estado(0.1)[2] == pytest.approx(2.0)
+    assert perfil.estado(0.35)[2] == pytest.approx(4.0)
+    posicion, velocidad, aceleracion = perfil.estado(1.6)
+    assert (posicion, velocidad, aceleracion) == pytest.approx((2.5, 2.0, 0.0))
+    assert perfil.estado(3.2) == (5.0, 0.0, 0.0)
+    assert perfil.terminado(3.2) and not perfil.terminado(3.1)
+
+
+def kalman_de_velocidad(dt, **extra):
+    return Kalman(
+        a=[[1.0, dt], [0.0, 1.0]],
+        h=[[1.0, 0.0]],
+        q=[[1e-6, 0.0], [0.0, 1e-5]],
+        r=[[0.2**2 / 3]],
+        p=[[1.0, 0.0], [0.0, 100.0]],
+        **extra,
+    )
+
+
+def test_kalman_estima_la_velocidad():
+    dt, velocidad = 0.01, 3.0
+    filtro = kalman_de_velocidad(dt)
+    semilla, posicion = 7, 0.0
+    for _ in range(1000):
+        posicion += velocidad * dt
+        semilla = (semilla * 1664525 + 1013904223) % 2**32
+        ruido = 0.2 * ((semilla >> 8) / 2**23 - 1.0)
+        filtro.predecir()
+        assert filtro.corregir(posicion + ruido)
+    assert filtro.x == pytest.approx([posicion, velocidad], abs=0.1)
+    assert filtro.p[0][0] < 0.2**2 / 3 / 5
+
+
+def test_kalman_con_entrada():
+    # La entrada es una aceleración conocida.
+    dt = 0.1
+    filtro = kalman_de_velocidad(dt, b=[[dt * dt / 2], [dt]], x=[1.0, 2.0])
+    filtro.predecir(4.0)
+    assert filtro.x == pytest.approx([1.22, 2.4])
+    filtro.predecir([0.0])
+    assert filtro.x == pytest.approx([1.46, 2.4])
+
+
+def test_kalman_acepta_numpy():
+    numpy = pytest.importorskip("numpy")
+    filtro = Kalman(numpy.eye(3), numpy.eye(2, 3), numpy.eye(3) * 1e-3, numpy.eye(2), b=numpy.ones((3, 2)))
+    filtro.predecir(numpy.array([1.0, 2.0]))
+    assert filtro.x == [3.0, 3.0, 3.0]
+    assert filtro.corregir(numpy.array([3.0, 3.0]))
+    assert len(filtro.p) == 3 and len(filtro.p[0]) == 3
+
+
+def test_kalman_rechaza_tamanos_incorrectos():
+    with pytest.raises(ValueError, match="`h` debe ser de 1×2"):
+        Kalman([[1.0, 0.0], [0.0, 1.0]], [[1.0]], [[1.0, 0.0], [0.0, 1.0]], [[1.0]])
+    with pytest.raises(ValueError, match="de 1 a 6 filas"):
+        Kalman([[1.0] * 7] * 7, [[1.0] * 7], [[1.0] * 7] * 7, [[1.0]])
+    filtro = kalman_de_velocidad(0.01)
+    with pytest.raises(ValueError, match="`z` debe tener 1 valores"):
+        filtro.corregir([1.0, 2.0])
+    with pytest.raises(ValueError, match="`u` debe tener 1 valores"):
+        filtro.predecir([1.0, 2.0])
+
+
+def test_kalman_sin_incertidumbre_no_corrige():
+    filtro = Kalman([[1.0]], [[1.0]], [[0.0]], [[0.0]], x=[2.0], p=[[0.0]])
+    assert not filtro.corregir(5.0)
+    assert filtro.x == [2.0]

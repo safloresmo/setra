@@ -1,7 +1,9 @@
 //! Módulo de Python: las mismas clases del núcleo, calculando en `f64`.
 
-use nucleo::perfil::{Estado, Limites};
-use nucleo::{filtro, perfil, pid, planta};
+use nucleo::matriz::{Matriz, Vector};
+use nucleo::perfil::{Estado, Limites, LimitesS};
+use nucleo::{filtro, kalman, perfil, pid, planta};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 /// PID en forma paralela con salida limitada y protección de la integral.
@@ -354,6 +356,238 @@ impl Pendulo {
     }
 }
 
+/// Movimiento de reposo a reposo de `desde` a `hasta` con el jerk limitado:
+/// la aceleración sube y baja en rampa en vez de saltar.
+#[pyclass(module = "setra")]
+struct PerfilS(perfil::PerfilS);
+
+#[pymethods]
+impl PerfilS {
+    #[new]
+    fn nuevo(velocidad: f64, aceleracion: f64, jerk: f64, desde: f64, hasta: f64) -> Self {
+        let limites = LimitesS {
+            velocidad,
+            aceleracion,
+            jerk,
+        };
+        Self(perfil::PerfilS::planear(limites, desde, hasta))
+    }
+
+    /// Posición, velocidad y aceleración de referencia a los `t` segundos.
+    fn estado(&self, t: f64) -> (f64, f64, f64) {
+        let estado = self.0.estado(t);
+        (estado.posicion, estado.velocidad, estado.aceleracion)
+    }
+
+    fn terminado(&self, t: f64) -> bool {
+        self.0.terminado(t)
+    }
+
+    /// Segundos que tarda el movimiento completo.
+    #[getter]
+    fn duracion(&self) -> f64 {
+        self.0.duracion()
+    }
+}
+
+// El filtro del núcleo fija sus tamaños al compilar. Aquí se llega a él a
+// través de este rasgo, eligiendo los tamaños según las matrices recibidas.
+trait Estimador: Send + Sync {
+    fn predecir(&mut self, u: &[f64]) -> PyResult<()>;
+    fn corregir(&mut self, z: &[f64]) -> PyResult<bool>;
+    fn x(&self) -> Vec<f64>;
+    fn p(&self) -> Vec<Vec<f64>>;
+}
+
+impl<const N: usize, const M: usize, const U: usize> Estimador for kalman::Kalman<N, M, U> {
+    fn predecir(&mut self, u: &[f64]) -> PyResult<()> {
+        let u = if u.is_empty() {
+            Vector::ceros()
+        } else {
+            vector("u", u)?
+        };
+        kalman::Kalman::predecir(self, &u);
+        Ok(())
+    }
+
+    fn corregir(&mut self, z: &[f64]) -> PyResult<bool> {
+        Ok(kalman::Kalman::corregir(self, &vector("z", z)?))
+    }
+
+    fn x(&self) -> Vec<f64> {
+        self.x.0.iter().map(|fila| fila[0]).collect()
+    }
+
+    fn p(&self) -> Vec<Vec<f64>> {
+        self.p.0.iter().map(|fila| fila.to_vec()).collect()
+    }
+}
+
+fn matriz<const F: usize, const C: usize>(
+    nombre: &str,
+    filas: &[Vec<f64>],
+) -> PyResult<Matriz<F, C>> {
+    if filas.len() != F || filas.iter().any(|fila| fila.len() != C) {
+        return Err(PyValueError::new_err(format!(
+            "`{nombre}` debe ser de {F}×{C}"
+        )));
+    }
+    let mut m = Matriz::ceros();
+    for (destino, fila) in m.0.iter_mut().zip(filas) {
+        destino.copy_from_slice(fila);
+    }
+    Ok(m)
+}
+
+fn vector<const N: usize>(nombre: &str, valores: &[f64]) -> PyResult<Vector<N>> {
+    let valores: [f64; N] = valores
+        .try_into()
+        .map_err(|_| PyValueError::new_err(format!("`{nombre}` debe tener {N} valores")))?;
+    Ok(Vector::columna(valores))
+}
+
+struct DatosKalman {
+    a: Vec<Vec<f64>>,
+    b: Option<Vec<Vec<f64>>>,
+    h: Vec<Vec<f64>>,
+    q: Vec<Vec<f64>>,
+    r: Vec<Vec<f64>>,
+    x: Option<Vec<f64>>,
+    p: Option<Vec<Vec<f64>>>,
+}
+
+fn construir<const N: usize, const M: usize, const U: usize>(
+    d: &DatosKalman,
+) -> PyResult<Box<dyn Estimador>> {
+    Ok(Box::new(kalman::Kalman::<N, M, U> {
+        a: matriz("a", &d.a)?,
+        b: match &d.b {
+            Some(b) => matriz("b", b)?,
+            None => Matriz::ceros(),
+        },
+        h: matriz("h", &d.h)?,
+        q: matriz("q", &d.q)?,
+        r: matriz("r", &d.r)?,
+        x: match &d.x {
+            Some(x) => vector("x", x)?,
+            None => Vector::ceros(),
+        },
+        p: match &d.p {
+            Some(p) => matriz("p", p)?,
+            None => Matriz::identidad(),
+        },
+    }))
+}
+
+fn con_entradas<const N: usize, const M: usize>(d: &DatosKalman) -> PyResult<Box<dyn Estimador>> {
+    // Sin `b` no hay entradas: queda una sola, con ganancia cero.
+    match d.b.as_ref().map_or(1, |b| b.first().map_or(0, Vec::len)) {
+        1 => construir::<N, M, 1>(d),
+        2 => construir::<N, M, 2>(d),
+        3 => construir::<N, M, 3>(d),
+        4 => construir::<N, M, 4>(d),
+        _ => Err(PyValueError::new_err("`b` debe tener de 1 a 4 columnas")),
+    }
+}
+
+fn con_medidas<const N: usize>(d: &DatosKalman) -> PyResult<Box<dyn Estimador>> {
+    match d.h.len() {
+        1 => con_entradas::<N, 1>(d),
+        2 => con_entradas::<N, 2>(d),
+        3 => con_entradas::<N, 3>(d),
+        4 => con_entradas::<N, 4>(d),
+        _ => Err(PyValueError::new_err("`h` debe tener de 1 a 4 filas")),
+    }
+}
+
+fn con_estados(d: &DatosKalman) -> PyResult<Box<dyn Estimador>> {
+    match d.a.len() {
+        1 => con_medidas::<1>(d),
+        2 => con_medidas::<2>(d),
+        3 => con_medidas::<3>(d),
+        4 => con_medidas::<4>(d),
+        5 => con_medidas::<5>(d),
+        6 => con_medidas::<6>(d),
+        _ => Err(PyValueError::new_err("`a` debe tener de 1 a 6 filas")),
+    }
+}
+
+#[derive(FromPyObject)]
+enum Valores {
+    Uno(f64),
+    Varios(Vec<f64>),
+}
+
+impl Valores {
+    fn lista(self) -> Vec<f64> {
+        match self {
+            Self::Uno(valor) => vec![valor],
+            Self::Varios(valores) => valores,
+        }
+    }
+}
+
+/// Filtro de Kalman lineal para el sistema discreto
+///
+///     x[k+1] = a·x[k] + b·u[k] + ruido de proceso (covarianza q)
+///     z[k]   = h·x[k] + ruido de medida (covarianza r)
+///
+/// Las matrices se dan como listas de filas o arreglos de NumPy. Admite hasta
+/// 6 estados, 4 medidas y 4 entradas. Sin `x` el estado inicial es cero y sin
+/// `p` la covarianza inicial es la identidad.
+#[pyclass(module = "setra")]
+struct Kalman(Box<dyn Estimador>);
+
+#[pymethods]
+impl Kalman {
+    #[new]
+    #[pyo3(signature = (a, h, q, r, *, b=None, x=None, p=None))]
+    fn nuevo(
+        a: Vec<Vec<f64>>,
+        h: Vec<Vec<f64>>,
+        q: Vec<Vec<f64>>,
+        r: Vec<Vec<f64>>,
+        b: Option<Vec<Vec<f64>>>,
+        x: Option<Vec<f64>>,
+        p: Option<Vec<Vec<f64>>>,
+    ) -> PyResult<Self> {
+        con_estados(&DatosKalman {
+            a,
+            b,
+            h,
+            q,
+            r,
+            x,
+            p,
+        })
+        .map(Self)
+    }
+
+    /// Avanza la estimación un periodo. Sin `u` la entrada es cero.
+    #[pyo3(signature = (u=None))]
+    fn predecir(&mut self, u: Option<Valores>) -> PyResult<()> {
+        self.0.predecir(&u.map(Valores::lista).unwrap_or_default())
+    }
+
+    /// Corrige la estimación con una medida. Devuelve `False`, sin cambiar
+    /// nada, si la covarianza de la innovación no se puede invertir.
+    fn corregir(&mut self, z: Valores) -> PyResult<bool> {
+        self.0.corregir(&z.lista())
+    }
+
+    /// Estado estimado.
+    #[getter]
+    fn x(&self) -> Vec<f64> {
+        self.0.x()
+    }
+
+    /// Covarianza del error de la estimación, por filas.
+    #[getter]
+    fn p(&self) -> Vec<Vec<f64>> {
+        self.0.p()
+    }
+}
+
 #[pymodule(name = "setra")]
 fn modulo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Pid>()?;
@@ -361,6 +595,8 @@ fn modulo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Bicuadratico>()?;
     m.add_class::<LimitadorPendiente>()?;
     m.add_class::<PerfilTrapezoidal>()?;
+    m.add_class::<PerfilS>()?;
+    m.add_class::<Kalman>()?;
     m.add_class::<MotorDc>()?;
     m.add_class::<Pendulo>()?;
     Ok(())

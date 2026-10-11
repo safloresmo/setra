@@ -12,9 +12,9 @@ El núcleo está escrito en Rust sin `std` ni memoria dinámica, así que el mis
 |---|---|---|
 | `pid` | PID con salida limitada, integral protegida contra la saturación, derivada filtrada (de la medida o del error) y entrada de adelanto | `Pid` |
 | `filtro` | Paso bajo de primer orden, bicuadrático (paso bajo y rechaza banda) y limitador de pendiente | `PasoBajo`, `Bicuadratico`, `LimitadorPendiente` |
-| `perfil` | Perfil trapezoidal de posición, con velocidad inicial y final para replanear en marcha | `PerfilTrapezoidal` |
+| `perfil` | Perfil trapezoidal de posición, con velocidad inicial y final para replanear en marcha, y perfil en S con el jerk limitado | `PerfilTrapezoidal`, `PerfilS` |
 | `planta` | Motor de corriente continua, péndulo e integrador de Runge-Kutta de orden 4 | `MotorDc`, `Pendulo` |
-| `kalman` | Filtro de Kalman lineal de tamaño fijo | — |
+| `kalman` | Filtro de Kalman lineal de tamaño fijo | `Kalman` (hasta 6 estados, 4 medidas y 4 entradas; acepta listas o arreglos de NumPy) |
 | `matriz` | Matrices de tamaño fijo con producto, transpuesta e inversa | — |
 
 El tiempo va siempre en segundos y cada bloque recibe su `dt`: nada depende de un reloj ni de una plataforma.
