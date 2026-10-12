@@ -11,6 +11,7 @@
 
 pub mod estados;
 pub mod filtro;
+pub mod identificacion;
 pub mod kalman;
 pub mod matriz;
 pub mod perfil;

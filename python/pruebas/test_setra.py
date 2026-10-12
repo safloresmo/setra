@@ -7,6 +7,7 @@ from setra import (
     Furuta,
     Kalman,
     LimitadorPendiente,
+    ModeloMotor,
     MotorDc,
     Observador,
     PasoBajo,
@@ -15,6 +16,7 @@ from setra import (
     PerfilTrapezoidal,
     Pid,
     discretizar,
+    identificar_motor,
     ganancia_observador,
     lqr,
 )
@@ -273,3 +275,36 @@ def test_furuta_se_sostiene():
         furuta.paso(-sum(g * x for g, x in zip(k, estado)), dt, subpasos=4)
     assert furuta.angulo_pendulo == pytest.approx(math.pi, abs=1e-3)
     assert furuta.angulo_brazo == pytest.approx(0.0, abs=1e-2)
+
+
+def ensayar(motor, niveles, cuentas_por_vuelta=2000):
+    paso_encoder = 2 * math.pi / cuentas_por_vuelta
+    voltajes, posiciones = [], []
+    for nivel in niveles:
+        for n in range(1000):
+            v = nivel if n < 600 else 0.0
+            voltajes.append(v)
+            posiciones.append(round(motor.posicion / paso_encoder) * paso_encoder)
+            motor.paso(v, DT, subpasos=20)
+    return voltajes, posiciones
+
+
+def test_identificar_motor():
+    motor = MotorDc(2.0, 2e-3, 0.05, 0.05, 2e-4, 1e-4, friccion_seca=0.01)
+    modelo = identificar_motor(*ensayar(motor, [3.0, 6.0, 9.0, 12.0]), DT)
+    assert modelo.ganancia == pytest.approx(0.05 / (2.0 * 1e-4 + 0.05 * 0.05), rel=0.03)
+    assert modelo.tau == pytest.approx(2e-4 * 2.0 / (2.0 * 1e-4 + 0.05 * 0.05), rel=0.05)
+    assert modelo.voltaje_friccion == pytest.approx(0.01 * 2.0 / 0.05, rel=0.15)
+    assert modelo.inercia(2.0) == pytest.approx(2e-4, rel=0.15)
+    assert "ganancia=" in repr(modelo)
+
+    with pytest.raises(ValueError, match="no determinan"):
+        identificar_motor([0.0] * 100, [0.0] * 100, DT)
+    with pytest.raises(ValueError, match="las mismas muestras"):
+        identificar_motor([0.0] * 10, [0.0] * 9, DT)
+
+
+def test_pi_sugerido():
+    kp, ki = ModeloMotor(18.5, 0.15).pi_velocidad(0.05)
+    assert ki == pytest.approx(1 / (18.5 * 0.05))
+    assert kp == pytest.approx(0.15 * ki)

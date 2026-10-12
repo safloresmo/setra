@@ -21,6 +21,7 @@ fn motor() -> MotorDc {
         ke: 0.05,
         inercia: 2e-4,
         friccion: 1e-4,
+        friccion_seca: 0.0,
         corriente: 0.0,
         velocidad: 0.0,
         posicion: 0.0,

@@ -2,7 +2,7 @@
 
 use nucleo::matriz::{Matriz, Vector};
 use nucleo::perfil::{Estado, Limites, LimitesS};
-use nucleo::{estados, filtro, kalman, perfil, pid, planta};
+use nucleo::{estados, filtro, identificacion, kalman, perfil, pid, planta};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -225,7 +225,7 @@ struct MotorDc(planta::MotorDc);
 #[pymethods]
 impl MotorDc {
     #[new]
-    #[pyo3(signature = (resistencia, inductancia, kt, ke, inercia, friccion=0.0))]
+    #[pyo3(signature = (resistencia, inductancia, kt, ke, inercia, friccion=0.0, *, friccion_seca=0.0))]
     fn nuevo(
         resistencia: f64,
         inductancia: f64,
@@ -233,6 +233,7 @@ impl MotorDc {
         ke: f64,
         inercia: f64,
         friccion: f64,
+        friccion_seca: f64,
     ) -> Self {
         Self(planta::MotorDc {
             resistencia,
@@ -241,6 +242,7 @@ impl MotorDc {
             ke,
             inercia,
             friccion,
+            friccion_seca,
             corriente: 0.0,
             velocidad: 0.0,
             posicion: 0.0,
@@ -873,6 +875,79 @@ impl Observador {
     }
 }
 
+/// Modelo de velocidad de un motor de corriente continua:
+///
+///     tau·dω/dt + ω = ganancia·(V − voltaje_friccion·signo(ω))
+///
+/// Lo devuelve `identificar_motor`.
+#[pyclass(module = "setra")]
+struct ModeloMotor(identificacion::ModeloMotor);
+
+#[pymethods]
+impl ModeloMotor {
+    #[new]
+    #[pyo3(signature = (ganancia, tau, voltaje_friccion=0.0))]
+    fn nuevo(ganancia: f64, tau: f64, voltaje_friccion: f64) -> Self {
+        Self(identificacion::ModeloMotor {
+            ganancia,
+            tau,
+            voltaje_friccion,
+        })
+    }
+
+    /// Velocidad de régimen por voltio, en rad/s por V.
+    #[getter]
+    fn ganancia(&self) -> f64 {
+        self.0.ganancia
+    }
+
+    /// Constante de tiempo mecánica, en segundos.
+    #[getter]
+    fn tau(&self) -> f64 {
+        self.0.tau
+    }
+
+    /// Voltaje que se va en vencer la fricción seca, en V.
+    #[getter]
+    fn voltaje_friccion(&self) -> f64 {
+        self.0.voltaje_friccion
+    }
+
+    /// Ganancias `(kp, ki)` de un PI de velocidad que deja el lazo cerrado
+    /// como un sistema de primer orden con constante de tiempo `tau_lazo`.
+    fn pi_velocidad(&self, tau_lazo: f64) -> (f64, f64) {
+        self.0.pi_velocidad(tau_lazo)
+    }
+
+    /// Inercia del rotor y la carga, en kg·m², a partir de la resistencia
+    /// del devanado.
+    fn inercia(&self, resistencia: f64) -> f64 {
+        self.0.inercia(resistencia)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ModeloMotor(ganancia={:.4}, tau={:.4}, voltaje_friccion={:.4})",
+            self.0.ganancia, self.0.tau, self.0.voltaje_friccion
+        )
+    }
+}
+
+/// Ajusta un `ModeloMotor` a un ensayo: el voltaje aplicado y la posición del
+/// eje (rad), muestreados cada `dt` segundos. Para separar la fricción seca
+/// de la ganancia el ensayo debe tener más de un nivel de voltaje.
+#[pyfunction]
+fn identificar_motor(voltaje: Vec<f64>, posicion: Vec<f64>, dt: f64) -> PyResult<ModeloMotor> {
+    if voltaje.len() != posicion.len() {
+        return Err(PyValueError::new_err(
+            "`voltaje` y `posicion` deben tener las mismas muestras",
+        ));
+    }
+    identificacion::identificar_motor(&voltaje, &posicion, dt)
+        .map(ModeloMotor)
+        .ok_or_else(|| PyValueError::new_err("los datos no determinan un modelo del motor"))
+}
+
 #[pymodule(name = "setra")]
 fn modulo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Pid>()?;
@@ -883,6 +958,8 @@ fn modulo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PerfilS>()?;
     m.add_class::<Kalman>()?;
     m.add_class::<Observador>()?;
+    m.add_class::<ModeloMotor>()?;
+    m.add_function(wrap_pyfunction!(identificar_motor, m)?)?;
     m.add_function(wrap_pyfunction!(discretizar, m)?)?;
     m.add_function(wrap_pyfunction!(lqr, m)?)?;
     m.add_function(wrap_pyfunction!(ganancia_observador, m)?)?;

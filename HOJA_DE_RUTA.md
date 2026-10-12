@@ -15,7 +15,8 @@ Setra está en construcción. La biblioteca ya se puede usar en simulación; lo 
 - [ ] Pruebas automáticas al subir cambios
 - [ ] Tipos para Python (`.pyi`), para que el editor complete y revise
 - [ ] Perfil en S con velocidad inicial y final, para replanear en marcha
-- [ ] Identificación: ajustar los parámetros de un modelo a partir de datos medidos
+- [x] Identificación de motores: modelo y ganancias de un PI a partir de un ensayo
+- [x] Banco de identificación: firmware para ESP32 y programa que corre el ensayo (`banco/`)
 
 ## Péndulo de Furuta
 
@@ -62,7 +63,7 @@ Lo que hay que anotar antes de diseñar nada:
 
 ### 5. Identificación
 
-- [ ] Respuesta del motor a escalones de voltaje: resistencia, constante de par y fricción
+- [ ] Pasar el motor por el banco de identificación (`banco/`): ganancia, constante de tiempo y fricción
 - [ ] Oscilación libre del péndulo: centro de masa, inercia y fricción
 - [ ] Comparar la simulación con lo medido y corregir el modelo
 

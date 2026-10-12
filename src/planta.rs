@@ -20,6 +20,10 @@ pub fn rk4<const N: usize>(
     core::array::from_fn(|i| x[i] + dt / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]))
 }
 
+// La fricción seca cambia de signo con el giro. Para poder integrarla se
+// suaviza el cambio alrededor de cero, en un margen de esta velocidad (rad/s).
+const VELOCIDAD_FRICCION_SECA: Real = 0.5;
+
 /// Motor de corriente continua de imanes permanentes, en unidades del SI.
 #[derive(Clone, Copy, Debug)]
 pub struct MotorDc {
@@ -35,6 +39,8 @@ pub struct MotorDc {
     pub inercia: Real,
     /// Fricción viscosa, en N·m·s/rad.
     pub friccion: Real,
+    /// Fricción seca, en N·m: el par que hay que vencer para que gire.
+    pub friccion_seca: Real,
 
     pub corriente: Real,
     pub velocidad: Real,
@@ -51,7 +57,11 @@ impl MotorDc {
             let [corriente, velocidad, _] = *x;
             [
                 (voltaje - m.resistencia * corriente - m.ke * velocidad) / m.inductancia,
-                (m.kt * corriente - m.friccion * velocidad - par_carga) / m.inercia,
+                (m.kt * corriente
+                    - m.friccion * velocidad
+                    - m.friccion_seca * Mate::tanh(velocidad / VELOCIDAD_FRICCION_SECA)
+                    - par_carga)
+                    / m.inercia,
                 velocidad,
             ]
         };
@@ -239,6 +249,7 @@ mod tests {
             ke: 0.05,
             inercia: 2e-4,
             friccion: 1e-4,
+            friccion_seca: 0.0,
             corriente: 0.0,
             velocidad: 0.0,
             posicion: 0.0,

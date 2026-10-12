@@ -17,8 +17,9 @@ El núcleo está escrito en Rust sin `std` ni memoria dinámica, así que el mis
 | `pid` | PID con salida limitada, integral protegida contra la saturación, derivada filtrada (de la medida o del error) y entrada de adelanto | `Pid` |
 | `filtro` | Paso bajo de primer orden, bicuadrático (paso bajo y rechaza banda) y limitador de pendiente | `PasoBajo`, `Bicuadratico`, `LimitadorPendiente` |
 | `perfil` | Perfil trapezoidal de posición, con velocidad inicial y final para replanear en marcha, y perfil en S con el jerk limitado | `PerfilTrapezoidal`, `PerfilS` |
-| `planta` | Motor de corriente continua, péndulo, péndulo invertido rotatorio (de Furuta) e integrador de Runge-Kutta de orden 4 | `MotorDc`, `Pendulo`, `Furuta` |
+| `planta` | Motor de corriente continua con fricción seca, péndulo, péndulo invertido rotatorio (de Furuta) e integrador de Runge-Kutta de orden 4 | `MotorDc`, `Pendulo`, `Furuta` |
 | `estados` | Discretización de un modelo continuo, ganancia del regulador LQR, ganancia del observador y observador de Luenberger | `discretizar`, `lqr`, `ganancia_observador`, `Observador` |
+| `identificacion` | Ajuste del modelo de un motor (ganancia, constante de tiempo y fricción seca) a partir de un ensayo, y ganancias de un PI de velocidad | `identificar_motor`, `ModeloMotor` |
 | `kalman` | Filtro de Kalman lineal de tamaño fijo | `Kalman` (hasta 6 estados, 4 medidas y 4 entradas; acepta listas o arreglos de NumPy) |
 | `matriz` | Matrices de tamaño fijo con producto, transpuesta e inversa | — |
 
@@ -56,6 +57,31 @@ Los ejemplos de `python/ejemplos/` necesitan `matplotlib`:
 - `furuta.py` sostiene un péndulo de Furuta con las limitaciones de un montaje real: el motor satura y los ángulos llegan con la resolución de los encoders. Sirve para dimensionar el montaje antes de construirlo.
 
 ![Péndulo invertido con regulador LQR y observador](capturas/pendulo_invertido.png)
+
+## Banco de identificación
+
+`banco/` sirve para medir un motor real y sacar su modelo:
+
+- `banco/firmware/`: programa para un ESP32 que aplica escalones de voltaje al motor y registra el encoder cada milisegundo. Los pines y el tipo de driver se eligen en `include/config.h`; se carga con `pio run -t upload`.
+- `banco/identificar.py`: manda el ensayo, recoge los datos, ajusta el modelo y lo compara con la medición.
+
+```sh
+python banco/identificar.py --simulado
+python banco/identificar.py --puerto /dev/ttyUSB0 --voltaje-fuente 12 --cuentas 1320
+```
+
+Con `--simulado` usa un motor de `setra` en vez del banco, para ver cómo trabaja sin conectar nada:
+
+![Ensayo de identificación con el motor simulado](capturas/identificacion.png)
+
+```text
+Ganancia:              18.60 rad/s por V
+Constante de tiempo:   149.5 ms
+Voltaje de fricción:   0.43 V
+PI de velocidad:       kp = 0.1613, ki = 1.079  (lazo de 50 ms)
+```
+
+El ajuste usa la posición del encoder y no la velocidad, así que aguanta encoders de poca resolución. Para separar la fricción seca de la ganancia el ensayo necesita varios niveles de voltaje, que es lo que hace por omisión.
 
 ## En Rust
 
